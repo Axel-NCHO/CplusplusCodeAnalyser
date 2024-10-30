@@ -1,10 +1,14 @@
-use std::fs::File;
-use std::io::Write;
-use serde::Serialize;
-use tree_sitter::{Node, Parser};
 extern crate tree_sitter_cpp;
+use clap::{arg, Parser};
+use serde::Serialize;
+use std::fs::File;
+use std::io::{Read, Write};
+use tree_sitter::Node;
+
 
 #[derive(Serialize)]
+/// A simplified version of tre_sitter's node for serialization.
+/// Only retains the kind of node, its name and its children.
 struct CodeNode {
     kind: String,
     name: Option<String>,
@@ -12,15 +16,27 @@ struct CodeNode {
 }
 
 
-fn main() {
-    // Some C++ code to parse
-    let cpp_code = r#"
+#[derive(clap::Parser, Debug)]
+#[command(about, long_about = None)]
+/// Command-line arguments
+struct Args {
+    /// Path to the C++ code to parse - Optional
+    #[arg(short, long, default_value_t = String::new())]
+    cpp: String,
+
+    /// Path to output file without extension - Optional
+    #[arg(short, long, default_value_t = String::from("code_structure"))]
+    output: String,
+}
+
+fn get_default_cpp_code() -> String {
+    String::from(r#"
     #include <iostream>
 
     struct Number {
         int value;
     };
-    
+
     void say_hello(const Number& x_times);
 
     int main() {
@@ -33,29 +49,56 @@ fn main() {
     void say_hello(const Number& x_times) {
         std::cout << "Hello " << x_times.value << " from function!" << std::endl;
     }
-    "#;
+    "#)
+}
+
+/// Retrieve the cpp file's content if any. Else, return the default cpp code.
+fn get_cpp_code_as_string(path: String) -> String {
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(_) => return get_default_cpp_code()
+    };
+
+    let mut content = String::new();
+
+    if file.read_to_string(&mut content).is_err() {
+        return get_default_cpp_code()
+    }
+
+    content
+}
+
+fn to_json(node: &CodeNode, path: &String) -> () {
+    let json_output = serde_json::to_string_pretty(node).expect("Failed to serialize JSON");
+    let mut file = File::create(&path).expect("Failed to create output file");
+    file.write_all(json_output.as_bytes()).expect("Failed to write JSON to file");
+}
+
+
+fn main() {
+    let args = Args::parse();
+    let cpp_code = get_cpp_code_as_string(args.cpp);
 
     // Initializing the C++ parser
-    let mut parser = Parser::new();
+    let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_cpp::LANGUAGE.into())
         .expect("Error loading C++ grammar");
 
     // Parsing the C++ code
-    let tree = parser.parse(cpp_code, None).unwrap();
+    let tree = parser.parse(&cpp_code, None).unwrap();
     let root_node = tree.root_node();
 
-    let code_structure = convert_node_to_json(&root_node, &cpp_code);
-    
-    // Writing the structure to a JSON file
-    let json_output = serde_json::to_string_pretty(&code_structure).expect("Failed to serialize JSON");
-    let mut file = File::create("code_structure.json").expect("Failed to create output file");
-    file.write_all(json_output.as_bytes()).expect("Failed to write JSON to file");
+    let code_structure = to_code_node(&root_node, &cpp_code);
 
-    println!("Code structure saved to code_structure.json");
+    let out = args.output + ".json";
+    to_json(&code_structure, &out);
+
+    println!("Code structure saved to {}", out);
 }
 
-fn convert_node_to_json(node: &Node, source_code: &str) -> CodeNode {
+/// Simplifies tree_sitter's node for serialization.
+fn to_code_node(node: &Node, source_code: &String) -> CodeNode {
     let kind = node.kind().to_string();
 
     let name = if kind.ends_with("identifier")  || kind.ends_with("type") {
@@ -66,7 +109,7 @@ fn convert_node_to_json(node: &Node, source_code: &str) -> CodeNode {
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             if child.kind() != "comment" {  // Ignore comments
-                children.push(convert_node_to_json(&child, source_code));
+                children.push(to_code_node(&child, source_code));
             }
         }
     }
